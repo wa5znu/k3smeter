@@ -1,0 +1,338 @@
+#!/usr/bin/python
+#
+# K2 Smeter-based bandscope - WA5ZNU <Leigh@WA5ZNU> Leigh L Klotz, Jr.
+# Based on an idea from G4ILO and using Python framework code from AA6E
+# K6WX also wrote something like this for MacOS but I haven't seen it.
+#
+
+# Click Scan to start a scan centered on current frequency.
+# Click on graph after scanning to QSY immediately and set current frequency for next scan.
+# Todo:
+# The scaling isn't right for bandspreads less than full width (i.e., near band edges or when you pull the range control down)
+# Need to actually read/write filter settings
+# Need to set the filter and the step separately
+# Find the best mode and filter setting for scanning.
+# Can we pipeline the QSY and the SMeter reading to cut down the latency?  Perhaps by using a filter 2x width of step
+#  and recording the SMeter reading as the result of the previous QSY?
+# Sanitize filterbandwidth, dx, step, and click-to-tune frequencies
+# Make the "..." button disappear when not in use
+# Put in some locks
+# Seems to fail to scan when current frequency is bottom band edge
+# General cleanup
+
+
+
+import string, serial, time, sys, math, os
+import random
+from Tkinter import *
+
+class smeter:
+    # K2
+    DEVICE="/dev/ttyS0"
+    #
+    IDENT="K2 SMeter.py 0.1  wa5znu.org 01/2005 (TNX AA6E es G4ILO)"
+    IDENT_SHORT="SMeter.py 0.1 WA5ZNU 2005"
+    #
+    divs = 0
+    rects = 0
+    dx = 4.0                # pixels per tick
+    x0 = 5                # start of ticks
+    y0 = 50.0; 
+    width = 400 + x0
+    leftTxtItem = 0
+    centerTxtItem = 0
+    rightTxtItem = 0
+    filterBandWidth = 1500	# current filter bandwidth and step size
+    simulate = FALSE
+    ser = 0
+    doQSY = FALSE
+    freq = 0
+    minFreq = 0
+    maxFreq = 0
+    lastScannedFreq = 0
+    restoreb = 0
+    redI = -1
+    currentdiv = 0
+    stopScanning = FALSE
+    scanning = FALSE
+    #
+    # Finish off update functions
+    #
+    def finish_update(self):
+        self.canvas.update_idletasks()
+        self.canvas.pack()
+        return None
+    #
+    # Return VFO current frequency
+    def getFreq(self):
+        if self.simulate:
+            return 7050*1000
+        else:
+            self.ser.write("FA;")
+            FA = self.ser.read(14)
+            if (FA):
+                if len(FA) <> 14:
+                    return -1
+                else:
+                    return string.atoi(FA[3:13])
+    #
+    # Set the VFO current frequency
+    # FA00014060000
+    # FA00007030000
+    def qsy(self, freq):
+        cmd = "FA00%09d;" % (freq)
+        if self.centerTxtItem <> 0:
+            self.canvas.itemconfigure(self.centerTxtItem, text="%s" % (self.roundKHz(freq)))
+        if self.simulate:
+            print cmd
+        else:
+            self.ser.write(cmd)
+    #
+    # Read S Meter
+    def getSMeter(self):
+        nnnn = ""
+        if self.simulate:
+            si = random.randint(10,15)
+            nnnn = "00" + str(si)
+        else:
+            self.ser.write("SM;")
+            nnnn = self.ser.read(4+3)
+        if len(nnnn) <> 4+3:
+            return -1
+        nnnn = nnnn[2:6]
+        return string.atoi (nnnn)
+    #
+    # Calculate maximum displayable bandspread
+    def bsmax(self):
+        return int(((self.width-self.x0)/self.dx) * self.filterBandWidth)/1000
+
+    def nextFilterBandwidth(self):
+        self.ser.write("FW0000;")
+        self.readFilterBandwidth()
+
+    def readFilterBandwidth(self):
+        self.ser.write("FW;")
+        # FW0000nm;
+        res = self.ser.read(9)
+        self.filterBandWidth=int(res[2:6])
+        self.filterb.configure(text="%s Hz" % (self.filterBandWidth))
+        bsmax = self.bsmax()
+        self.bandSpread.configure(to=bsmax)
+        if bsmax > 100:
+            self.bandSpread.set(100)
+        else:
+            self.bandSpread.set(bsmax)
+    #
+    # Switch step size
+    def filter(self):
+        self.nextFilterBandwidth()
+
+    #
+    # Restore VFO to the setting at last scan
+    def reset(self):
+        self.clearRedI()
+        self.qsy(self.lastScannedFreq)
+
+    #
+    # Sync display with VFO (well, try anyway)
+    def readvfo(self):
+        self.clearRedI()
+        self.freq = self.getFreq()
+        self.lastScannedFreq = self.freq
+        self.doQSY = FALSE
+        self.qsy(self.lastScannedFreq)
+        s=("QSY %s" % (self.roundKHz(self.lastScannedFreq)))
+        self.restoreb.configure(text=s)
+
+    #
+    # Update display only when Scan button is pressed
+    def scan(self):
+        self.scanning = TRUE
+        # Check the bandspread
+        if self.freq == 0 or not self.doQSY:
+            self.freq = self.getFreq()
+        self.lastScannedFreq = self.freq
+        self.doQSY = FALSE
+        s=("QSY %s" % (self.roundKHz(self.lastScannedFreq)))
+        self.restoreb.configure(text=s)
+        bs = self.bandSpread.get()
+        b = bs * 1000         # KHz
+        self.minFreq = self.freq - b/2
+        self.maxFreq = self.freq + b/2
+        (self.minFreq, self.maxFreq) = self.bandEdges(self.minFreq, self.maxFreq)
+        self.divs = int((self.maxFreq - self.minFreq) / self.filterBandWidth)
+        if (self.divs != len(self.rects)):
+            self.resetRects()
+        minF = self.roundKHz(self.minFreq)
+        cenF = self.roundKHz(self.freq)
+        maxF = self.roundKHz(self.maxFreq)
+        self.clearRedI()
+        if self.leftTxtItem == 0:
+             self.leftTxtItem = self.canvas.create_text(self.x0,65, anchor=W, text="%s" % (minF))
+        else:
+             self.canvas.itemconfigure(self.leftTxtItem, text="%s" % (minF))
+        if self.centerTxtItem == 0:
+             self.centerTxtItem = self.canvas.create_text(self.x0+self.dx*self.divs/2,65, anchor=CENTER, text="%s" % (cenF))
+        else:
+             self.canvas.itemconfigure(self.centerTxtItem, text="%s" % (cenF))
+        if self.rightTxtItem == 0:
+             self.rightTxtItem = self.canvas.create_text(self.x0+self.dx*self.divs,65, anchor=E, text="%s" % (maxF))
+        else:
+             self.canvas.itemconfigure(self.rightTxtItem, text="%s" % (maxF))
+        self.currentdiv = 0
+        self.canvas.after(0, self.scanloop)		# schedule immediate update
+        return None
+
+    def scanloop(self):
+        # Graph the S meter
+        self.qsy(self.minFreq + self.filterBandWidth * self.currentdiv)
+        #if self.currentdiv == 0:
+        #	time.sleep(0.05)
+        time.sleep(0.04)
+        svalue = self.getSMeter()
+        if (svalue < 0):
+            self.finish_update()
+            return None
+        self.plotSMeter(self.currentdiv, svalue)
+        self.canvas.update_idletasks()
+        self.currentdiv += 1
+        if self.currentdiv < self.divs and not self.stopScanning:
+            self.canvas.after(0, self.scanloop)		# schedule immediate update
+        else:
+            # Return to original freq unless user clicked tostop
+            self.finish_update()
+            if not self.stopScanning:
+                self.qsy(self.freq)
+                self.stopScanning = FALSE
+            self.scanning = FALSE
+
+
+    def bandEdges(self, minFreq, maxFreq):
+        bandEdgeData = [(1800,2000),(3500,4000),(7000,7300),(10100,10150),(14000,14350),(18068,18168),(21000,21450),(24890,24990),(28000,29700)]
+        for bandNo in range(len(bandEdgeData)):
+            band = bandEdgeData[bandNo]
+            bot = band[0]*1000
+            if minFreq < bot:
+                minFreq = bot
+                if maxFreq > band[1]*1000:
+                    maxFreq = band[1]*1000
+                break
+            top = band[1]*1000
+            if minFreq >= bot and minFreq <= top:
+                if maxFreq > top:
+                    maxFreq = top
+                break
+        return (minFreq, maxFreq)
+    
+
+    def plotSMeter(self, i, svalue):
+        vmax = 15
+        x = self.x0 + i*self.dx
+        dy = svalue*50/vmax
+        pd = float(self.dx * self.divs)
+        if self.rects[i] == 0:
+            self.rects[i] = self.canvas.create_rectangle(x,self.y0-dy,x+(self.dx-1),self.y0, fill='dark green', outline='')
+        else:
+            self.canvas.coords(self.rects[i],x,self.y0-dy,x+(self.dx-1),self.y0)
+
+    def roundKHz(self,f):
+        return round(f/100.0)/10.0
+    
+    def clearRedI(self):
+        if (self.redI <> -1):
+            self.canvas.itemconfigure(self.rects[self.redI],fill='dark green')
+        self.redI=-1
+
+    def moveRedI(self, x):
+        self.clearRedI()
+        self.redI = int((x-self.x0)/self.dx)
+        self.canvas.itemconfigure(self.rects[self.redI],fill='red')
+
+    def click(self, event):
+        x, y = event.x, event.y
+        f = (self.minFreq + self.filterBandWidth*(float(x-self.x0)/self.dx))
+        # f = int(f/10)*10
+        s=("QSY %s" % (self.roundKHz(self.lastScannedFreq)))
+        self.restoreb.configure(text=s)
+        self.doQSY = TRUE
+        if self.scanning:
+            self.stopScanning = TRUE
+        self.freq = f
+        self.qsy(f)
+        if self.centerTxtItem <> 0:
+            self.canvas.itemconfigure(self.centerTxtItem, text="%s" % (self.roundKHz(self.freq)))
+        self.moveRedI(x)
+
+    def setBandSpread(self,b):
+        if (self.divs <> b):
+            self.divs = b
+            self.bandSpread.set(b)
+            self.resetRects()
+
+    def resetRects(self):
+        if (self.rects <> 0):
+            for i in range(len(self.rects)):
+                if (self.rects[i] <> 0):
+                    self.canvas.delete(self.rects[i])
+        self.rects = self.divs * [ 0 ]	# rectangle items for data display
+
+    #
+    # Main
+    def main(self):
+        print self.IDENT			# Print our own ID
+        # UI Setup
+        root = Tk()
+        root.title('S Meter')
+        self.canvas = Canvas(root, width=self.width, height=70)
+        self.canvas.create_text(self.width/2,6,text=self.IDENT_SHORT,fill="#808080", font=('Verdana','8'),anchor=CENTER)
+        self.canvas.pack()
+        self.canvas.bind("<Button-1>", self.click)
+        
+        bsmax = self.bsmax()
+        self.bandSpread = Scale(root, label="Bandspread (KHz)", orient=HORIZONTAL, \
+          troughcolor="#C0C0E0",fg="Blue", bg="#B0B0B0", length=180, to=bsmax, \
+          tickinterval=50)
+        if bsmax > 100:
+            self.setBandSpread(100)
+        else:
+            self.setBandSpread(bsmax)
+        self.bandSpread.pack()
+        quitb = Button(root, text="Quit", command=root.quit); quitb.pack(side=RIGHT)
+        self.filterb = Button(root, text="Filter", command=self.filter); self.filterb.pack(side=RIGHT)
+        scanb = Button(root, text="Scan", command=self.scan); scanb.pack(side=LEFT)
+        self.readvfob = Button(root, text="VFO", command=self.readvfo); self.readvfob.pack(side=LEFT)
+        self.restoreb = Button(root, text="...", command=self.reset); self.restoreb.pack(side=LEFT)
+
+        try:
+            # Serial init
+            self.ser = serial.Serial(self.DEVICE,baudrate=4800,rtscts=0) #timeout=2
+            self.ser.write("K2;");
+            K2n = self.ser.read(4);
+            if (len(K2n) != 4):
+                print "Not a K2: %s" % K2n
+            else:
+                self.ser.write("AI0;K22;")
+                self.ser.write("RX;")           # Force RX
+                self.ser.write("GT;");
+                oldagc = self.ser.read(6);
+                self.ser.write("GT002;");        # fast AGC
+                self.ser.flushInput()
+                self.ser.flushOutput()
+                self.readvfo()
+                self.readFilterBandwidth()
+                # Window system
+                root.mainloop()			# Loop forever, responding to events
+                # Restore AGC
+                self.ser.write(oldagc);
+        finally:
+            # Close down serial
+            try:
+                self.ser.write(";")
+            finally:
+                self.ser.flushInput()		# until the "quit" comes along.
+                self.ser.close()
+
+if __name__ == "__main__":
+    s = smeter()
+    s.main()
+    
