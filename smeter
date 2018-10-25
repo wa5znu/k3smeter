@@ -1,5 +1,7 @@
 #!/usr/bin/python
 #
+# Ancient code -- don't look too closely.
+#
 # K2 Smeter-based bandscope - WA5ZNU <Leigh@WA5ZNU> Leigh L Klotz, Jr.
 # Based on an idea from G4ILO and using Python framework code from AA6E
 # K6WX also wrote something like this for MacOS but I haven't seen it.
@@ -28,7 +30,7 @@ from Tkinter import *
 
 class smeter:
     # K2
-    DEVICE="/dev/ttyS0"
+    DEVICE="/dev/ttyS5"
     #
     IDENT="K2 SMeter.py 0.1  wa5znu.org 01/2005 (TNX AA6E es G4ILO)"
     IDENT_SHORT="SMeter.py 0.1 WA5ZNU 2005"
@@ -236,7 +238,7 @@ class smeter:
             self.canvas.coords(self.rects[i],x,self.y0-dy,x+(self.dx-1),self.y0)
 
     def roundKHz(self,f):
-        return round(f/10.0)/100.0
+        return round(f/100.0)/10.0
     
     def clearRedI(self):
         if (self.redI <> -1):
@@ -251,6 +253,7 @@ class smeter:
     def click(self, event):
         x, y = event.x, event.y
         f = (self.minFreq + self.filterBandWidth*(float(x-self.x0)/self.dx))
+        # f = int(f/10)*10
         s=("QSY %s" % (self.roundKHz(self.lastScannedFreq)))
         self.restoreb.configure(text=s)
         self.doQSY = TRUE
@@ -304,7 +307,7 @@ class smeter:
 
         try:
             # Serial init
-            self.ser = serial.Serial(self.DEVICE,baudrate=4800,rtscts=0) #timeout=2
+            self.ser = serial.Serial(self.DEVICE,baudrate=38400,rtscts=0) #timeout=2
             self.ser.write("K2;");
             K2n = self.ser.read(4);
             if (len(K2n) != 4):
