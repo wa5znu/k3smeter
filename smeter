@@ -236,7 +236,7 @@ class smeter:
             self.canvas.coords(self.rects[i],x,self.y0-dy,x+(self.dx-1),self.y0)
 
     def roundKHz(self,f):
-        return round(f/100.0)/10.0
+        return round(f/10.0)/100.0
     
     def clearRedI(self):
         if (self.redI <> -1):
@@ -251,7 +251,6 @@ class smeter:
     def click(self, event):
         x, y = event.x, event.y
         f = (self.minFreq + self.filterBandWidth*(float(x-self.x0)/self.dx))
-        # f = int(f/10)*10
         s=("QSY %s" % (self.roundKHz(self.lastScannedFreq)))
         self.restoreb.configure(text=s)
         self.doQSY = TRUE
